@@ -1,112 +1,84 @@
 package exporter
 
 import (
-	"encoding/json"
-	"fmt"
-	"strconv"
+	"context"
+	"sync"
 
-	log "github.com/sirupsen/logrus"
+	conf "github.com/infinityworks/github-exporter/config"
+	"github.com/shurcooL/githubv4"
 )
 
-// gatherData - Collects the data from the API and stores into struct
-func (e *Exporter) gatherData() ([]*Datum, *RateLimits, error) {
+func (e *Exporter) gatherData() (*githubData, error) {
+	var (
+		mux sync.Mutex
+		wg  sync.WaitGroup
+	)
 
-	data := []*Datum{}
-
-	responses, err := asyncHTTPGets(e.TargetURLs, e.APIToken)
-
-	if err != nil {
-		return data, nil, err
+	result := &githubData{
+		RateLimit{},
+		[]Organization{},
+		[]User{},
+		[]Repository{},
 	}
 
-	for _, response := range responses {
-
-		// Github can at times present an array, or an object for the same data set.
-		// This code checks handles this variation.
-		if isArray(response.body) {
-			ds := []*Datum{}
-			json.Unmarshal(response.body, &ds)
-			data = append(data, ds...)
-		} else {
-			d := new(Datum)
-			json.Unmarshal(response.body, &d)
-			data = append(data, d)
-		}
-
-		log.Infof("API data fetched for repository: %s", response.url)
+	for _, login := range e.Config.Users {
+		wg.Add(1)
+		go func(login string) {
+			defer wg.Done()
+			var query UserQuery
+			e.Client.Query(context.Background(), &query, map[string]interface{}{
+				"login":         githubv4.String(login),
+				"repoCount":     githubv4.Int(10),
+				"languageCount": githubv4.Int(5),
+			})
+			if query.User.ID != "" {
+				mux.Lock()
+				result.Users = append(result.Users, query.User)
+				result.RateLimit = query.RateLimit
+				mux.Unlock()
+			}
+		}(login)
 	}
 
-	// Check the API rate data and store as a metric
-	rates, err := getRates(e.APIURL, e.APIToken)
-
-	if err != nil {
-		log.Errorf("Unable to obtain rate limit data from API, Error: %s", err)
+	for _, login := range e.Config.Organisations {
+		wg.Add(1)
+		go func(login string) {
+			defer wg.Done()
+			var query OrganizationQuery
+			e.Client.Query(context.Background(), &query, map[string]interface{}{
+				"login":         githubv4.String(login),
+				"repoCount":     githubv4.Int(10),
+				"languageCount": githubv4.Int(5),
+			})
+			if query.Organization.ID != "" {
+				mux.Lock()
+				result.Organizations = append(result.Organizations, query.Organization)
+				result.RateLimit = query.RateLimit
+				mux.Unlock()
+			}
+		}(login)
 	}
 
-	//return data, rates, err
-	return data, rates, nil
-
-}
-
-// getRates obtains the rate limit data for requests against the github API.
-// Especially useful when operating without oauth and the subsequent lower cap.
-func getRates(baseURL string, token string) (*RateLimits, error) {
-
-	rateEndPoint := ("/rate_limit")
-	url := fmt.Sprintf("%s%s", baseURL, rateEndPoint)
-
-	resp, err := getHTTPResponse(url, token)
-
-	defer resp.Body.Close()
-
-	if err != nil {
-		return &RateLimits{}, err
+	for _, repo := range e.Config.Repositories {
+		wg.Add(1)
+		go func(repo conf.Repository) {
+			defer wg.Done()
+			var query RepositoryQuery
+			e.Client.Query(context.Background(), &query, map[string]interface{}{
+				"owner":         githubv4.String(repo.Owner),
+				"name":          githubv4.String(repo.Name),
+				"languageCount": githubv4.Int(5),
+			})
+			if query.Repository.ID != "" {
+				mux.Lock()
+				result.Repositories = append(result.Repositories, query.Repository)
+				result.RateLimit = query.RateLimit
+				mux.Unlock()
+			}
+		}(repo)
 	}
 
-	// Triggers if rate-limiting isn't enabled on private Github Enterprise installations
-	if resp.StatusCode == 404 {
-		return &RateLimits{}, fmt.Errorf("Rate Limiting not enabled in GitHub API")
-	}
+	wg.Wait()
 
-	limit, err := strconv.ParseFloat(resp.Header.Get("X-RateLimit-Limit"), 64)
-
-	if err != nil {
-		return &RateLimits{}, err
-	}
-
-	rem, err := strconv.ParseFloat(resp.Header.Get("X-RateLimit-Remaining"), 64)
-
-	if err != nil {
-		return &RateLimits{}, err
-	}
-
-	reset, err := strconv.ParseFloat(resp.Header.Get("X-RateLimit-Reset"), 64)
-
-	if err != nil {
-		return &RateLimits{}, err
-	}
-
-	return &RateLimits{
-		Limit:     limit,
-		Remaining: rem,
-		Reset:     reset,
-	}, err
-
-}
-
-// isArray simply looks for key details that determine if the JSON response is an array or not.
-func isArray(body []byte) bool {
-
-	isArray := false
-
-	for _, c := range body {
-		if c == ' ' || c == '\t' || c == '\r' || c == '\n' {
-			continue
-		}
-		isArray = c == '['
-		break
-	}
-
-	return isArray
-
+	return result, nil
 }

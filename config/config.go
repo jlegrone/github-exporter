@@ -1,13 +1,18 @@
 package config
 
 import (
-	"fmt"
 	"io/ioutil"
+	"net/http"
 	"strings"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 
+	"context"
 	"os"
+
+	"github.com/shurcooL/githubv4"
+	"golang.org/x/oauth2"
 
 	cfg "github.com/infinityworks/go-common/config"
 )
@@ -15,88 +20,87 @@ import (
 // Config struct holds all of the runtime confgiguration for the application
 type Config struct {
 	*cfg.BaseConfig
-	APIURL        string
-	Repositories  string
-	Organisations string
-	Users         string
-	APITokenEnv   string
-	APITokenFile  string
+	Repositories  []Repository
+	Organisations []string
+	Users         []string
 	APIToken      string
-	TargetURLs    []string
+	Client        *githubv4.Client
 }
+
+type Repository struct {
+	Owner string
+	Name  string
+}
+
+const defaultAPIURL = "https://api.github.com"
 
 // Init populates the Config struct based on environmental runtime configuration
 func Init() Config {
 
 	ac := cfg.Init()
-	url := cfg.GetEnv("API_URL", "https://api.github.com")
-	repos := os.Getenv("REPOS")
-	orgs := os.Getenv("ORGS")
-	users := os.Getenv("USERS")
+	url := cfg.GetEnv("API_URL", defaultAPIURL)
+	repoStrings := splitEnvVar("REPOS")
+	orgs := splitEnvVar("ORGS")
+	users := splitEnvVar("USERS")
 	tokenEnv := os.Getenv("GITHUB_TOKEN")
 	tokenFile := os.Getenv("GITHUB_TOKEN_FILE")
 	token, err := getAuth(tokenEnv, tokenFile)
-	scraped, err := getScrapeURLs(url, repos, orgs, users)
 
 	if err != nil {
 		log.Errorf("Error initialising Configuration, Error: %v", err)
 	}
 
+	repos := []Repository{}
+
+	for _, repo := range repoStrings {
+		parts := strings.Split(repo, "/")
+		repos = append(repos, Repository{
+			Owner: parts[0],
+			Name:  parts[1],
+		})
+	}
+
+	var (
+		httpClient *http.Client
+		client     *githubv4.Client
+	)
+	if token != "" {
+		tokenSource := oauth2.StaticTokenSource(
+			&oauth2.Token{AccessToken: token},
+		)
+		httpClient = oauth2.NewClient(context.Background(), tokenSource)
+	} else {
+		httpClient = &http.Client{}
+	}
+	httpClient.Timeout = time.Second * 15
+	if url != defaultAPIURL {
+		client = githubv4.NewEnterpriseClient(url, httpClient)
+	} else {
+		client = githubv4.NewClient(httpClient)
+	}
+
 	appConfig := Config{
 		&ac,
-		url,
 		repos,
 		orgs,
 		users,
-		tokenEnv,
-		tokenFile,
 		token,
-		scraped,
+		client,
 	}
 
 	return appConfig
 }
 
-// Init populates the Config struct based on environmental runtime configuration
-// All URL's are added to the TargetURL's string array
-func getScrapeURLs(apiURL, repos, orgs, users string) ([]string, error) {
-
-	urls := []string{}
-
-	opts := "?&per_page=100" // Used to set the Github API to return 100 results per page (max)
-
-	// User input validation, check that either repositories or organisations have been passed in
-	if len(repos) == 0 && len(orgs) == 0 && len(users) == 0 {
-		return urls, fmt.Errorf("No targets specified")
-	}
-
-	// Append repositories to the array
-	if repos != "" {
-		rs := strings.Split(repos, ", ")
-		for _, x := range rs {
-			y := fmt.Sprintf("%s/repos/%s%s", apiURL, x, opts)
-			urls = append(urls, y)
+func splitEnvVar(envVar string) []string {
+	raw := os.Getenv(envVar)
+	var values []string
+	for _, val := range strings.Split(raw, ",") {
+		if val != "" {
+			values = append(values, strings.TrimSpace(val))
 		}
 	}
 
-	// Append github orginisations to the array
-	if orgs != "" {
-		o := strings.Split(orgs, ", ")
-		for _, x := range o {
-			y := fmt.Sprintf("%s/orgs/%s/repos%s", apiURL, x, opts)
-			urls = append(urls, y)
-		}
-	}
-
-	if users != "" {
-		us := strings.Split(users, ", ")
-		for _, x := range us {
-			y := fmt.Sprintf("%s/users/%s/repos%s", apiURL, x, opts)
-			urls = append(urls, y)
-		}
-	}
-
-	return urls, nil
+	return values
 }
 
 // getAuth returns oauth2 token as string for usage in http.request

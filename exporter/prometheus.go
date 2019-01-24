@@ -19,7 +19,7 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 	// Scrape the Data from Github
-	var data, rates, err = e.gatherData()
+	var data, err = e.gatherData()
 
 	if err != nil {
 		log.Errorf("Error gathering Data from remote API: %v", err)
@@ -27,7 +27,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	// Set prometheus gauge metrics using the data gathered
-	err = e.processMetrics(data, rates, ch)
+	err = e.processMetrics(data, ch)
 
 	if err != nil {
 		log.Error("Error Processing Metrics", err)
