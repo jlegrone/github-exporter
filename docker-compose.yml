@@ -1,13 +1,32 @@
 version: "2"
 
 services:
+  prometheus:
+    image: prom/prometheus:latest
+    expose:
+    - 9090
+    ports:
+    - 9090:9090
+    volumes:
+    - ./examples/prometheus.yml:/etc/prometheus/prometheus.yml
+  grafana:
+    image: grafana/grafana:latest
+    expose:
+    - 3000
+    ports:
+    - 3000:3000
+    volumes:
+    - ./examples/grafana/config:/etc/grafana
+    - ./examples/grafana/dashboards:/var/lib/grafana/dashboards
+    # Data persistence
+    - /var/lib/grafana
   github-exporter:
     tty: true
     stdin_open: true
     expose:
-      - 9171
+    - 9171
     ports:
-      - 9171:9171
+    - 9171:9171
     image: infinityworks/github-exporter:latest
     build: .
     env_file:
